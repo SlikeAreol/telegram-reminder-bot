@@ -1,12 +1,11 @@
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+from datetime import datetime
+from dateutil import parser
 import json
 import os
-from datetime import datetime
-import time
-import threading
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 DATA_FILE = "reminders.json"
 
@@ -18,81 +17,72 @@ def load_reminders():
         return json.load(f)
 
 
-def save_reminders(data):
+def save_reminders(reminders):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(reminders, f, ensure_ascii=False, indent=2)
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Привет!\n\n"
-        "Напиши напоминание в формате:\n"
-        "ДД.ММ.ГГГГ ЧЧ:ММ — текст\n\n"
-        "Пример:\n"
-        "05.01.2026 18:00 — Позвонить маме"
-    )
-
-
-async def add_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
     try:
-        date_part, message = text.split("—", 1)
-        date_part = date_part.strip()
-        message = message.strip()
+        if "—" not in text:
+            raise ValueError
 
-        remind_time = datetime.strptime(date_part, "%d.%m.%Y %H:%M")
+        date_part, message = text.split("—", 1)
+        remind_time = parser.parse(date_part.strip(), dayfirst=True)
 
         reminders = load_reminders()
         reminders.append({
+            "chat_id": update.effective_chat.id,
             "time": remind_time.isoformat(),
-            "text": message,
-            "chat_id": update.message.chat_id
+            "text": message.strip()
         })
         save_reminders(reminders)
 
-        await update.message.reply_text("✅ Напоминание добавлено")
+        await update.message.reply_text(
+            f"✅ Напоминание сохранено:\n{remind_time.strftime('%d.%m.%Y %H:%M')}"
+        )
 
     except Exception:
-        await update.message.reply_text("❌ Не понял формат даты и времени")
+        await update.message.reply_text(
+            "❌ Не понял формат.\nПример:\n25.12.2025 18:00 — Позвонить маме"
+        )
 
 
-def reminder_worker(app):
+async def reminder_loop(app):
     while True:
         now = datetime.now()
         reminders = load_reminders()
-        updated = []
+        remaining = []
 
         for r in reminders:
             remind_time = datetime.fromisoformat(r["time"])
             if remind_time <= now:
-                app.bot.send_message(
+                await app.bot.send_message(
                     chat_id=r["chat_id"],
                     text=f"⏰ Напоминание:\n{r['text']}"
                 )
             else:
-                updated.append(r)
+                remaining.append(r)
 
-        save_reminders(updated)
-        time.sleep(30)
+        save_reminders(remaining)
+        await app.bot.sleep(30)
 
 
 def main():
     print("🤖 БОТ ЗАПУЩЕН")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, add_reminder))
-
-    thread = threading.Thread(target=reminder_worker, args=(app,), daemon=True)
-    thread.start()
-
+    app.create_task(reminder_loop(app))
     app.run_polling()
 
 
 if __name__ == "__main__":
     main()
+
 
 
 
