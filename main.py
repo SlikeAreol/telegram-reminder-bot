@@ -1,3 +1,7 @@
+import os
+import json
+from datetime import datetime
+
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -6,122 +10,102 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from datetime import datetime, timedelta
-import re
-import uuid
 
-BOT_TOKEN = "8029046646:AAF6hjKnQGfE303qVAzZAT3O0mqqKQoJvnE"
-
-# Хранилище напоминаний
-reminders = {}  # reminder_id -> dict
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+DATA_FILE = "reminders.json"
 
 
-# ====== ПАРСИНГ СООБЩЕНИЯ ======
-def parse_message(text: str):
-    pattern = r"через\s+(\d+)\s+(минут|минуты|минуту|час|часа|часов)\s*—\s*(.+)"
-    match = re.match(pattern, text.lower())
-
-    if not match:
-        return None
-
-    value = int(match.group(1))
-    unit = match.group(2)
-    message = match.group(3)
-
-    if "минут" in unit:
-        delta = timedelta(minutes=value)
-    else:
-        delta = timedelta(hours=value)
-
-    remind_time = datetime.now() + delta
-    return remind_time, message
+def load_reminders():
+    if not os.path.exists(DATA_FILE):
+        return []
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-# ====== ОБРАБОТКА СООБЩЕНИЙ ======
+def save_reminders(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Привет!\n\n"
+        "Напиши напоминание в формате:\n"
+        "DD.MM.YYYY HH:MM — текст\n\n"
+        "Пример:\n"
+        "05.12.2025 18:00 — Позвонить маме"
+    )
+
+
+async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reminders = load_reminders()
+    if not reminders:
+        await update.message.reply_text("📭 Напоминаний пока нет")
+        return
+
+    text = "📋 Твои напоминания:\n\n"
+    for i, r in enumerate(reminders, 1):
+        text += f"{i}. {r['time']} — {r['text']}\n"
+
+    await update.message.reply_text(text)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    chat_id = update.message.chat_id
 
-    parsed = parse_message(text)
-    if not parsed:
-        await update.message.reply_text(
-            "❌ Я не понял формат\n\n"
-            "Пример:\n"
-            "через 10 минут — сделать чай\n"
-            "через 1 час — позвонить маме"
-        )
+    try:
+        date_part, reminder_text = text.split("—", 1)
+        reminder_time = datetime.strptime(date_part.strip(), "%d.%m.%Y %H:%M")
+    except Exception:
+        await update.message.reply_text("❌ Не понял дату и время")
         return
 
-    remind_time, message = parsed
-    delay = (remind_time - datetime.now()).total_seconds()
+    reminders = load_reminders()
+    reminders.append({
+        "time": reminder_time.strftime("%d.%m.%Y %H:%M"),
+        "timestamp": reminder_time.timestamp(),
+        "text": reminder_text.strip(),
+        "chat_id": update.message.chat_id
+    })
+    save_reminders(reminders)
 
-    reminder_id = str(uuid.uuid4())[:8]
-
-    job = context.job_queue.run_once(
-        send_reminder,
-        when=delay,
-        chat_id=chat_id,
-        data={"id": reminder_id, "text": message},
-    )
-
-    reminders[reminder_id] = {
-        "time": remind_time,
-        "text": message,
-        "job": job,
-    }
-
-    await update.message.reply_text(
-        f"✅ Напоминание добавлено\n"
-        f"🆔 ID: {reminder_id}\n"
-        f"⏰ {remind_time.strftime('%d.%m %H:%M')}"
-    )
+    await update.message.reply_text("✅ Напоминание сохранено")
 
 
-# ====== ОТПРАВКА НАПОМИНАНИЯ ======
-async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
-    data = context.job.data
-    reminder_id = data["id"]
-    text = data["text"]
+async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now().timestamp()
+    reminders = load_reminders()
+    remaining = []
 
-    await context.bot.send_message(
-        chat_id=context.job.chat_id,
-        text=f"⏰ НАПОМИНАНИЕ:\n{text}",
-    )
+    for r in reminders:
+        if now >= r["timestamp"]:
+            await context.bot.send_message(
+                chat_id=r["chat_id"],
+                text=f"⏰ Напоминание:\n{r['text']}"
+            )
+        else:
+            remaining.append(r)
 
-    reminders.pop(reminder_id, None)
-
-
-# ====== СПИСОК НАПОМИНАНИЙ ======
-async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not reminders:
-        await update.message.reply_text("📭 Напоминаний нет")
-        return
-
-    lines = ["📋 Текущие напоминания:\n"]
-    for rid, r in reminders.items():
-        lines.append(
-            f"🆔 {rid}\n"
-            f"⏰ {r['time'].strftime('%d.%m %H:%M')}\n"
-            f"📝 {r['text']}\n"
-        )
-
-    await update.message.reply_text("\n".join(lines))
+    save_reminders(remaining)
 
 
-# ====== СТАРТ ======
 def main():
     print("🤖 БОТ ЗАПУЩЕН И ЖДЁТ СООБЩЕНИЙ")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_reminders))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    app.job_queue.run_repeating(check_reminders, interval=60, first=10)
 
     app.run_polling()
 
 
 if __name__ == "__main__":
     main()
+
 
 
 
